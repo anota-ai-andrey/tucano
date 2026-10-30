@@ -18,6 +18,14 @@ export interface Model {
 // The system the app runs on (src/core/platform.ts).
 export type Os = 'mac' | 'linux' | 'windows'
 
+export type ExecutionTarget = { kind: 'windows' } | { kind: 'wsl'; distro: string }
+export interface WslDistribution {
+  name: string
+  state: string
+  version: 1 | 2
+  isDefault: boolean
+}
+
 // Shortcuts use ⌘ on a Mac and Ctrl elsewhere, shown the way each system writes them.
 export const shortcut = (os: Os, key: string): string => (os === 'mac' ? `⌘${key}` : `Ctrl+${key}`)
 
@@ -188,6 +196,7 @@ export interface Settings {
   approvalTtlHours: number
   theme: 'system' | 'light' | 'dark'
   language: Lang // the app's, and the language agents answer in
+  executionTarget?: ExecutionTarget // on Windows, where harnesses and local-computer commands run
   openAtLogin?: boolean // so routines run without me opening the app
   runBudgetPct?: number // per reply, % of the agent's monthly limit before it pauses; default RUN_BUDGET_PCT
   runStallMinutes?: number // without any sign of life; default RUN_STALL_MINUTES
@@ -352,6 +361,7 @@ export interface Connector {
   url?: string // remote
   command?: string // stdio
   args?: string[]
+  executionTarget?: ExecutionTarget // local stdio server runtime; unset means this Windows/Linux app host
   envKeys?: string[] // names only; values are secrets
   auth: ConnectorAuth
   status: ConnectorStatus
@@ -367,6 +377,7 @@ export interface ConnectorInput {
   token?: string
   command?: string
   args?: string[]
+  executionTarget?: ExecutionTarget
   env?: Record<string, string>
 }
 

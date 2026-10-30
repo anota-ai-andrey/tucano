@@ -7,11 +7,13 @@ import { executableNames, isWin, pathDirs, spawnable } from '../platform'
 import { userProvider } from './claude'
 import { codexEnv, userCodexProvider } from './codex'
 import { opencodeMajor } from './opencode-v2'
+import { activeWslDistro, setExecutionProblem, wslHome, wslLoginEnv, wslPathToWindows } from '../wsl'
 
 function run(bin: string, args: string[], timeout = 15_000, env: NodeJS.ProcessEnv = process.env): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve) => {
     const s = spawnable(bin, args)
-    execFile(s.file, s.args, { timeout, env, windowsHide: true, windowsVerbatimArguments: s.verbatim }, (err, stdout, stderr) => {
+    execFile(s.file, s.args, { timeout, env: s.wsl ? process.env : env, windowsHide: true, windowsVerbatimArguments: s.verbatim }, (err, stdout, stderr) => {
+      s.cleanup?.()
       const code = err ? (typeof err.code === 'number' ? err.code : 1) : 0
       resolve({ code, stdout: String(stdout), stderr: String(stderr) })
     })
@@ -30,6 +32,11 @@ export async function adoptLoginShellPath(): Promise<void> {
 }
 
 async function which(cmd: string): Promise<string | undefined> {
+  if (activeWslDistro()) {
+    const { code, stdout } = await run('/bin/bash', ['-lc', 'command -v -- "$1"', 'tucano', cmd])
+    const found = stdout.trim().split(/\r?\n/).at(-1)
+    return code === 0 && found?.startsWith('/') ? found : undefined
+  }
   for (const dir of pathDirs()) {
     for (const name of executableNames(cmd)) {
       const p = join(dir, name)
@@ -46,7 +53,7 @@ async function which(cmd: string): Promise<string | undefined> {
 
 const version = (out: string): string | undefined => out.match(/\d+\.\d+\.\d+/)?.[0]
 
-export async function detectClaude(): Promise<EngineStatus> {
+export async function detectClaude(provider = userProvider()): Promise<EngineStatus> {
   const path = await which('claude')
   if (!path) return { installed: false, loggedIn: false }
   const [v, auth] = await Promise.all([run(path, ['--version']), run(path, ['auth', 'status'])])
@@ -59,7 +66,7 @@ export async function detectClaude(): Promise<EngineStatus> {
   const loggedIn = status['loggedIn'] === true
   const subscription = typeof status['subscriptionType'] === 'string' ? status['subscriptionType'] : undefined
   const viaSubscription = status['authMethod'] === 'claude.ai'
-  const gateway = gatewayHost(userProvider().env['ANTHROPIC_BASE_URL'])
+  const gateway = gatewayHost(provider.env['ANTHROPIC_BASE_URL'])
   if (gateway) return { installed: true, path, version: version(v.stdout), loggedIn: true, route: 'gateway', gateway, account: L(`Gateway ${gateway} · pelo seu settings.json`, `Gateway ${gateway} · from your settings.json`) }
   return {
     installed: true,
@@ -83,10 +90,10 @@ const gatewayHost = (url: string | undefined): string | undefined => {
 }
 
 // Checks the app's own Codex login (see codexEnv), not the user's.
-export async function detectCodex(home: string): Promise<EngineStatus> {
+export async function detectCodex(home: string, provider = userCodexProvider()): Promise<EngineStatus> {
   const path = await which('codex')
   if (!path) return { installed: false, loggedIn: false }
-  const gateway = gatewayHost(userCodexProvider().baseUrl)
+  const gateway = gatewayHost(provider.baseUrl)
   if (gateway) return { installed: true, path, version: version((await run(path, ['--version'])).stdout), loggedIn: true, route: 'gateway', gateway, account: L(`Gateway ${gateway} · pelo seu config.toml`, `Gateway ${gateway} · from your config.toml`) }
   const [v, auth] = await Promise.all([run(path, ['--version']), run(path, ['login', 'status'], 15_000, codexEnv(home))])
   const text = `${auth.stdout}\n${auth.stderr}`
@@ -151,6 +158,30 @@ export async function detectPi(): Promise<{ status: EngineStatus; models: string
 }
 
 export async function detectEngines(codexHome: string): Promise<{ engines: Record<EngineId, EngineStatus>; listed: Partial<Record<EngineId, string[]>> }> {
-  const [claude, codex, opencode, pi] = await Promise.all([detectClaude(), detectCodex(codexHome), detectOpenCode(), detectPi()])
+  const distro = activeWslDistro()
+  let home: string | undefined
+  let login: NodeJS.ProcessEnv = process.env
+  try {
+    home = distro ? wslPathToWindows(wslHome(distro), distro) : undefined
+    if (distro) login = await wslLoginEnv(distro)
+  } catch (error) {
+    const warning = error instanceof Error ? error.message : String(error)
+    setExecutionProblem(warning)
+    const unavailable: EngineStatus = { installed: false, loggedIn: false, warning }
+    return { engines: { claude: unavailable, codex: unavailable, opencode: unavailable, pi: unavailable }, listed: {} }
+  }
+  const configDir = (value: string | undefined, fallback: string): string => {
+    if (!value) return fallback
+    if (value === '~') return home ?? fallback
+    if (value.startsWith('~/')) return join(home ?? '', value.slice(2))
+    if (distro && value.startsWith('/')) return wslPathToWindows(value, distro)
+    return value
+  }
+  const [claude, codex, opencode, pi] = await Promise.all([
+    detectClaude(userProvider(home ? configDir(login['CLAUDE_CONFIG_DIR'], join(home, '.claude')) : undefined)),
+    detectCodex(codexHome, userCodexProvider(home ? configDir(login['CODEX_HOME'], join(home, '.codex')) : undefined)),
+    detectOpenCode(),
+    detectPi()
+  ])
   return { engines: { claude, codex, opencode: opencode.status, pi: pi.status }, listed: { opencode: opencode.models, pi: pi.models } }
 }

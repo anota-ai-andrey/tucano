@@ -174,6 +174,8 @@ function HarnessRow({ engine, st, picked, toggle }: { engine: EngineId; st: Engi
   // No terminal could be opened: the command, for the person to run.
   const [manual, setManual] = useState<string | null>(null)
   const windows = useStore((s) => s.platform === 'windows')
+  const wsl = useStore((s) => s.settings.executionTarget?.kind === 'wsl')
+  const windowsExecution = windows && !wsl
   const ready = st.loggedIn
   const found = st.installed && !!st.route // what its setup says, picked or not
 
@@ -228,8 +230,8 @@ function HarnessRow({ engine, st, picked, toggle }: { engine: EngineId; st: Engi
       )}
       {!st.installed && (
         <div className="harness__body">
-          <span className="hint">{windows ? L('Pra instalar, cole no PowerShell:', 'To install, paste in PowerShell:') : L('Pra instalar, cole no terminal:', 'To install, paste in a terminal:')}</span>
-          <code className="harness__cmd">{(windows && ENGINES[engine].windows) || ENGINES[engine].install}</code>
+          <span className="hint">{windowsExecution ? L('Pra instalar, cole no PowerShell:', 'To install, paste in PowerShell:') : L('Pra instalar, cole no terminal:', 'To install, paste in a terminal:')}</span>
+          <code className="harness__cmd">{(windowsExecution && ENGINES[engine].windows) || ENGINES[engine].install}</code>
         </div>
       )}
       {st.warning && <p className="hint hint--warn harness__body">{st.warning}</p>}
