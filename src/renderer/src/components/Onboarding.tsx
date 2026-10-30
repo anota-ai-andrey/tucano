@@ -6,13 +6,14 @@
 // the person lands in a channel watching it work. Then "Primeiros passos" in the sidebar
 // walks through the rest, checking itself off as each feature gets used.
 import { L, lang } from '../../../shared/lang'
-import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from 'react'
+import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from 'react'
 import {
   ENGINES,
   MODELS,
   addConnector,
   authorizeConnector,
   customModel,
+  engineModels,
   getState,
   dmWith,
   linkSkill,
@@ -29,16 +30,16 @@ import {
   ensureTuca,
   settleDraft,
   updateSettings,
-  useStore,
   wslDistributions,
+  useStore,
   type Agent,
   type AgentColor,
   type AgentDraft,
   type EngineId,
   type GrantLevel,
   type LocalSkill,
-  type State,
   type WslDistribution,
+  type State,
   type View,
   isTeam
 } from '../store'
@@ -189,8 +190,8 @@ export function Onboarding({ build = false, from }: { build?: boolean; from?: Vi
   // A new install picks both models; seeing the introduction again starts from what's set.
   const [routerModel, setRouterModel] = useState(hasAgents ? settings.routerModel : '')
   const [memoryModel, setMemoryModel] = useState(hasAgents ? settings.memoryModel : '')
-  const [skills, setSkills] = useState<string[]>([])
   const [tucaModel, setTucaModel] = useState(hasAgents ? settings.routerModel : '')
+  const [skills, setSkills] = useState<string[]>([])
   const [grants, setGrants] = useState<Record<string, GrantLevel>>({})
   // The first agent comes from the Tuca's card, or from the form for who prefers it.
   const [manual, setManual] = useState(false)
@@ -312,7 +313,7 @@ export function Onboarding({ build = false, from }: { build?: boolean; from?: Vi
             (manual ? (
               <MakeAgent agent={agent} handle={handle} template={template} pick={pick} patch={patch} computer={computer} onBack={() => setManual(false)} onNext={next} />
             ) : (
-              <MeetTuca conv={tucaConv} onUse={useDraft} onManual={() => setManual(true)} onBack={build ? undefined : back} />
+              <MeetTuca conv={tucaConv} modelId={tucaModel || routerModel || agent.modelId} onModelChange={setTucaModel} onUse={useDraft} onManual={() => setManual(true)} onBack={build ? undefined : back} />
             ))}
           {step === 'powers' && <Powers agent={agent} handle={handle} patch={patch} computer={computer} setComputer={setComputer} grants={grants} setGrants={setGrants} onBack={back} onNext={next} />}
           {step === 'first' && <FirstTask agent={agent} handle={handle} computer={computer} channel={unique(L('geral', 'general'), channels)} tasks={tasks} task={task} setTask={setTask} busy={busy} onBack={back} onFinish={() => void finish()} />}
@@ -432,7 +433,6 @@ function ChatPreview({ me }: { me: string }): ReactNode {
 // ---------- 2. engine ----------
 
 function Harnesses({ ready, onBack, onNext }: { ready: boolean; onBack: () => void; onNext: () => void }): ReactNode {
-  // Logging in happens in the Terminal; keep checking until one is ready.
   const platform = useStore((s) => s.platform)
   const settings = useStore((s) => s.settings)
   const [distros, setDistros] = useState<WslDistribution[]>([])
@@ -460,6 +460,7 @@ function Harnesses({ ready, onBack, onNext }: { ready: boolean; onBack: () => vo
     }
   }, [platform])
 
+  // Logging in happens in the Terminal; keep checking until one is ready.
   useEffect(() => {
     refreshEngines()
     if (ready) return
@@ -508,8 +509,8 @@ function Harnesses({ ready, onBack, onNext }: { ready: boolean; onBack: () => vo
             {!wslError && !distros.some((d) => d.version === 2) && target.kind !== 'wsl' && <p className="hint">{L('Não encontrei uma distribuição WSL 2 instalada.', 'No installed WSL 2 distribution was found.')}</p>}
           </>
         )}
-        {!ready && (
         <HarnessList />
+        {!ready && (
           <p className="onb__wait">
             <span className="pulse" /> {L('Esperando um deles ficar pronto…', 'Waiting for one of them to be ready…')}
           </p>
@@ -754,13 +755,81 @@ function You({ name, context, setContext, onBack, onNext }: { name: string; cont
 // ---------- 4. the agent ----------
 
 // The first agent, made with the Tuca: he asks, proposes a card, "Usar esse agente" fills it in.
-function MeetTuca({ conv: session, onUse, onManual, onBack }: { conv: { id?: string; error?: string }; onUse: (d: AgentDraft, messageId: string) => void; onManual: () => void; onBack?: () => void }): ReactNode {
+function MeetTuca({ conv: session, modelId, onModelChange, onUse, onManual, onBack }: { conv: { id?: string; error?: string }; modelId: string; onModelChange: (modelId: string) => void; onUse: (d: AgentDraft, messageId: string) => void; onManual: () => void; onBack?: () => void }): ReactNode {
   const build = useContext(BuildMode)
-  const conv = session.id
+  const [conv, setConv] = useState(session.id)
+  const [selectedModel, setSelectedModel] = useState(modelId)
+  const [applyingModel, setApplyingModel] = useState(false)
+  const [modelError, setModelError] = useState('')
+  const selectionId = useRef(0)
+  const applyTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  useEffect(() => setConv(session.id), [session.id])
   const error = session.error ?? ''
   const tuca = useStore((s) => s.agents.find((a) => a.kind === 'tuca'))
+  useEffect(() => {
+    if (tuca?.modelId && !applyTimer.current && !applyingModel) setSelectedModel(tuca.modelId)
+  }, [tuca?.modelId, applyingModel])
+  useEffect(() => () => clearTimeout(applyTimer.current), [])
   const messages = useStore((s) => (conv ? s.messages.filter((m) => m.conversationId === conv) : []))
   const latest = [...messages].reverse().find((m) => m.run?.agentDraft && !m.run.agentDraft.state)?.run?.agentDraft
+
+  async function applyModel(value: string): Promise<void> {
+    if (!modelInfo(value)?.id || value === tuca?.modelId) {
+      setApplyingModel(false)
+      return
+    }
+    setApplyingModel(true)
+    setModelError('')
+    try {
+      const session = await ensureTuca(value, true, true)
+      setConv(session.conversationId)
+      onModelChange(value)
+    } catch (e) {
+      setModelError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setApplyingModel(false)
+    }
+  }
+
+  function changeModel(value: string): void {
+    selectionId.current++
+    const id = selectionId.current
+    clearTimeout(applyTimer.current)
+    applyTimer.current = undefined
+    setSelectedModel(value)
+    onModelChange(value)
+    setModelError('')
+
+    const model = modelInfo(value)
+    if (model?.id) {
+      applyTimer.current = setTimeout(() => {
+        applyTimer.current = undefined
+        if (id === selectionId.current) void applyModel(value)
+      }, 700)
+      return
+    }
+    if (!model) return
+
+    // Choosing a provider without a model selects its first chat model, then restarts Tuca.
+    setApplyingModel(true)
+    void engineModels(model.engine)
+      .then(async ({ models, error }) => {
+        if (id !== selectionId.current) return
+        const name = models.find((item) => !/(?:embed|whisper|transcrib|moderation|rerank|speech|audio|tts|image|dall-e)/i.test(item))
+        if (!name) {
+          setModelError(error ?? L('Esse harness não listou um modelo de conversa.', 'This harness did not list a conversation model.'))
+          return
+        }
+        const next = customModel(model.engine, name)
+        setSelectedModel(next)
+        onModelChange(next)
+        await applyModel(next)
+      })
+      .catch((e: unknown) => setModelError(e instanceof Error ? e.message : String(e)))
+      .finally(() => {
+        if (id === selectionId.current) setApplyingModel(false)
+      })
+  }
 
   return (
     <div className="onb__split">
@@ -806,6 +875,12 @@ function MeetTuca({ conv: session, onUse, onManual, onBack }: { conv: { id?: str
             <p className="muted small">{L('A proposta dele aparece aqui: nome, o que faz, modelo e o que pode acessar.', 'Its proposal shows up here: name, what it does, model and what it can access.')}</p>
           </div>
         )}
+        <div className="onb__field onb__field--tuca-model">
+          <span>{L('Modelo do Tuca', 'Tuca model')}</span>
+          <ModelPicker value={selectedModel} onChange={changeModel} />
+          <span className="hint">{applyingModel ? L('Trocando o modelo e reiniciando a conversa…', 'Changing the model and restarting the conversation…') : L('Ao escolher um modelo ou provedor, o Tuca reinicia a conversa com ele.', 'Choosing a model or provider restarts Tuca’s conversation with it.')}</span>
+          {modelError && <p className="hint hint--warn">{modelError}</p>}
+        </div>
       </aside>
     </div>
   )
